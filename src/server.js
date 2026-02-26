@@ -1,6 +1,25 @@
 const express = require('express');
 const cron = require('node-cron');
 const path = require('path');
+const fs = require('fs');
+
+function loadDotEnv() {
+  const envPath = path.join(__dirname, '..', '.env');
+  if (!fs.existsSync(envPath)) return;
+  const lines = fs.readFileSync(envPath, 'utf8').split(/\r?\n/);
+  for (const line of lines) {
+    const raw = line.trim();
+    if (!raw || raw.startsWith('#')) continue;
+    const idx = raw.indexOf('=');
+    if (idx <= 0) continue;
+    const key = raw.slice(0, idx).trim();
+    const value = raw.slice(idx + 1).trim().replace(/^"|"$/g, '');
+    if (!(key in process.env)) process.env[key] = value;
+  }
+}
+
+loadDotEnv();
+
 const db = require('./db');
 const { syncSource, searchPublicAccounts } = require('./sync');
 
@@ -11,14 +30,16 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
 const sourceInsert = db.prepare(`
-  INSERT INTO sources (id, name, wechat_id, description, profile_url, feed_url)
-  VALUES (@id, @name, @wechat_id, @description, @profile_url, @feed_url)
+  INSERT INTO sources (id, fakeid, name, wechat_id, alias, description, profile_url, avatar_url)
+  VALUES (@id, @fakeid, @name, @wechat_id, @alias, @description, @profile_url, @avatar_url)
   ON CONFLICT(id) DO UPDATE SET
+    fakeid=excluded.fakeid,
     name=excluded.name,
     wechat_id=excluded.wechat_id,
+    alias=excluded.alias,
     description=excluded.description,
     profile_url=excluded.profile_url,
-    feed_url=excluded.feed_url
+    avatar_url=excluded.avatar_url
 `);
 
 app.get('/api/sources', (_req, res) => {
@@ -34,17 +55,16 @@ app.get('/api/sources/search', async (req, res) => {
     const results = await searchPublicAccounts(q);
     res.json(results);
   } catch (error) {
-    const local = db.prepare(
-      `SELECT * FROM sources WHERE name LIKE ? OR description LIKE ? OR wechat_id LIKE ? LIMIT 20`
-    ).all(`%${q}%`, `%${q}%`, `%${q}%`);
-    res.json(local);
+    res.status(502).json({ error: error.message });
   }
 });
 
 app.post('/api/sources', (req, res) => {
-  const { id, name, wechat_id, description, profile_url, feed_url } = req.body || {};
-  if (!id || !name) return res.status(400).json({ error: 'id and name are required' });
-  sourceInsert.run({ id, name, wechat_id, description, profile_url, feed_url });
+  const payload = req.body || {};
+  if (!payload.id || !payload.name) {
+    return res.status(400).json({ error: 'id(fakeid) and name are required' });
+  }
+  sourceInsert.run(payload);
   res.json({ ok: true });
 });
 
@@ -75,19 +95,19 @@ app.get('/api/categories', (req, res) => {
   let rows;
   if (q) {
     rows = db.prepare(`
-      SELECT a.category, COUNT(*) AS count
+      SELECT COALESCE(NULLIF(a.category, ''), 'others') AS category, COUNT(*) AS count
       FROM articles a
       JOIN articles_fts f ON a.rowid = f.rowid
       WHERE articles_fts MATCH ? ${sourceId ? 'AND a.source_id = ?' : ''}
-      GROUP BY a.category
+      GROUP BY COALESCE(NULLIF(a.category, ''), 'others')
       ORDER BY count DESC
     `).all(sourceId ? [q, sourceId] : [q]);
   } else {
     rows = db.prepare(`
-      SELECT category, COUNT(*) AS count
+      SELECT COALESCE(NULLIF(category, ''), 'others') AS category, COUNT(*) AS count
       FROM articles
       ${sourceId ? 'WHERE source_id = ?' : ''}
-      GROUP BY category
+      GROUP BY COALESCE(NULLIF(category, ''), 'others')
       ORDER BY count DESC
     `).all(sourceId ? [sourceId] : []);
   }
@@ -108,7 +128,7 @@ app.get('/api/articles', (req, res) => {
   let join = 'LEFT JOIN sources s ON s.id = a.source_id';
 
   if (category) {
-    where.push('a.category = ?');
+    where.push("COALESCE(NULLIF(a.category, ''), 'others') = ?");
     params.push(category);
   }
   if (sourceId) {
@@ -130,7 +150,7 @@ app.get('/api/articles', (req, res) => {
     FROM articles a
     ${join}
     ${whereClause}
-    ORDER BY datetime(a.update_time) DESC
+    ORDER BY a.update_time DESC
     LIMIT ? OFFSET ?
   `).all(...params, pageSize, offset);
 
