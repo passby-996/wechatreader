@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WeChat Reader</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header>
+    <h1>WeChat Reader</h1>
+    <button id="syncAllBtn">Sync all now</button>
+  </header>
+  <main class="layout">
+    <aside>
+      <h2>Source List</h2>
+      <div class="search-row">
+        <input id="sourceSearchInput" placeholder="Search 公众号" />
+        <button id="sourceSearchBtn">Search</button>
+      </div>
+      <div id="searchResults"></div>
+      <ul id="sourceList"></ul>
+    </aside>
+    <section>
+      <div class="toolbar">
+        <input id="articleSearchInput" placeholder="Full text search on title/description" />
+        <button id="articleSearchBtn">Search</button>
+      </div>
+      <p id="warning" class="warning hidden">nothing found</p>
+      <div id="categories"></div>
+    </section>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>

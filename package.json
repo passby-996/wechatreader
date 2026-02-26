@@ -1,0 +1,19 @@
+{
+  "name": "wechatreader",
+  "version": "1.0.0",
+  "description": "Responsive web project for managing and searching WeChat official account articles",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node src/server.js",
+    "lint": "node --check src/server.js && node --check src/db.js && node --check src/sync.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.7",
+    "better-sqlite3": "^11.3.0",
+    "cheerio": "^1.0.0",
+    "express": "^4.21.1",
+    "node-cron": "^3.0.3",
+    "rss-parser": "^3.13.0"
+  }
+}
