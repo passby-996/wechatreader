@@ -1,22 +1,7 @@
 const express = require('express');
 const cron = require('node-cron');
 const path = require('path');
-const fs = require('fs');
-
-function loadDotEnv() {
-  const envPath = path.join(__dirname, '..', '.env');
-  if (!fs.existsSync(envPath)) return;
-  const lines = fs.readFileSync(envPath, 'utf8').split(/\r?\n/);
-  for (const line of lines) {
-    const raw = line.trim();
-    if (!raw || raw.startsWith('#')) continue;
-    const idx = raw.indexOf('=');
-    if (idx <= 0) continue;
-    const key = raw.slice(0, idx).trim();
-    const value = raw.slice(idx + 1).trim().replace(/^"|"$/g, '');
-    if (!(key in process.env)) process.env[key] = value;
-  }
-}
+const { loadDotEnv } = require('./config');
 
 loadDotEnv();
 

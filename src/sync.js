@@ -1,24 +1,5 @@
 const axios = require('axios');
-
-function getApiBase() {
-  return process.env.API_BASE || 'https://down.mptext.top/api/public/v1';
-}
-
-function getFetchSize() {
-  return Number(process.env.FETCH_SIZE || 50);
-}
-
-function getAuthKey() {
-  return process.env.X_AUTH_KEY || process.env.X_AUTH_TOKEN || process.env['X-Auth-Key'] || '';
-}
-
-function getHeaders() {
-  const authKey = getAuthKey();
-  if (!authKey) {
-    throw new Error('Missing auth key in env (X_AUTH_KEY or X-Auth-Key)');
-  }
-  return { 'X-Auth-Key': authKey };
-}
+const { getApiBase, getFetchSize, getHeaders } = require('./config');
 
 function normalizeCategory(rawCategory) {
   if (!rawCategory) return 'others';
@@ -70,13 +51,14 @@ async function searchPublicAccounts(keyword) {
 
 async function fetchAllArticles(source) {
   const all = [];
+  const size = getFetchSize();
   let begin = 0;
 
   while (true) {
     // eslint-disable-next-line no-await-in-loop
     const res = await axios.get(`${getApiBase()}/article`, {
       headers: getHeaders(),
-      params: { fakeid: source.id, size: getFetchSize(), begin },
+      params: { fakeid: source.id, size, begin },
       timeout: 20000
     });
 
@@ -87,13 +69,8 @@ async function fetchAllArticles(source) {
     const batch = res.data.articles || [];
     all.push(...batch);
 
-    if (!batch.length || batch.length < getFetchSize()) break;
-    if (!Number.isFinite(begin)) break;
-
-    const nextBegin = begin + batch.length;
-    if (nextBegin === begin) break;
-    begin = nextBegin;
-
+    if (!batch.length || batch.length < size) break;
+    begin += batch.length;
     if (begin > 5000) break;
   }
 
