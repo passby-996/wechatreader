@@ -1,169 +1,127 @@
 const axios = require('axios');
-const Parser = require('rss-parser');
-const crypto = require('crypto');
 
-const parser = new Parser({ timeout: 15000 });
+const API_BASE = process.env.API_BASE || 'https://down.mptext.top/api/public/v1';
+const AUTH_KEY = process.env.X_AUTH_KEY || process.env.X_AUTH_TOKEN;
+const FETCH_SIZE = Number(process.env.FETCH_SIZE || 50);
 
-function detectFeedUrl(source) {
-  if (source.feed_url) return source.feed_url;
-  if (source.wechat_id) {
-    return `https://wechat2rss.xlab.app/feed/${encodeURIComponent(source.wechat_id)}`;
+function getHeaders() {
+  if (!AUTH_KEY) {
+    throw new Error('Missing X_AUTH_KEY in environment');
   }
-  return null;
+  return { 'X-Auth-Key': AUTH_KEY };
 }
 
-function mapItem(source, item) {
-  const title = item.title || 'Untitled';
-  const description = item.contentSnippet || item.summary || '';
-  const link = item.link || source.profile_url || '#';
-  const updateTime = item.isoDate || item.pubDate || new Date().toISOString();
-  const category = (item.categories && item.categories[0]) || 'Uncategorized';
-  const authorName = item.creator || item.author || source.name;
-  const idSeed = `${source.id}|${link}|${title}`;
-  const id = crypto.createHash('sha1').update(idSeed).digest('hex');
+function normalizeCategory(rawCategory) {
+  if (!rawCategory) return 'others';
+  return String(rawCategory).trim() || 'others';
+}
+
+function normalizeSource(item) {
+  return {
+    id: item.fakeid,
+    fakeid: item.fakeid,
+    name: item.nickname,
+    wechat_id: item.alias || '',
+    alias: item.alias || '',
+    description: item.signature || '',
+    profile_url: `https://mp.weixin.qq.com/mp/profile_ext?action=home&__biz=${encodeURIComponent(item.fakeid)}`,
+    avatar_url: item.round_head_img || ''
+  };
+}
+
+function normalizeArticle(source, item) {
+  const category = normalizeCategory(item?.appmsg_album_infos?.[0]?.title);
+  const updateTimestamp = Number(item.update_time || item.create_time || Math.floor(Date.now() / 1000));
 
   return {
-    id,
+    id: item.aid,
     source_id: source.id,
-    title,
-    description,
+    title: item.title || 'Untitled',
+    digest: item.digest || '',
     category,
-    link,
-    update_time: new Date(updateTime).toISOString(),
-    author_name: authorName
+    link: item.link || '#',
+    update_time: updateTimestamp,
+    author_name: item.author_name || source.name
   };
+}
+
+async function searchPublicAccounts(keyword) {
+  const res = await axios.get(`${API_BASE}/account`, {
+    headers: getHeaders(),
+    params: { keyword, size: 20 },
+    timeout: 15000
+  });
+
+  if (res.data?.base_resp?.ret !== 0) {
+    throw new Error(res.data?.base_resp?.err_msg || 'account search failed');
+  }
+
+  return (res.data.list || []).map(normalizeSource);
+}
+
+async function fetchAllArticles(source) {
+  const all = [];
+  let begin = 0;
+
+  while (true) {
+    // Upstream API supports size and begin cursor.
+    // If begin is ignored by upstream, we stop after the first request to avoid endless loops.
+    // eslint-disable-next-line no-await-in-loop
+    const res = await axios.get(`${API_BASE}/article`, {
+      headers: getHeaders(),
+      params: { fakeid: source.id, size: FETCH_SIZE, begin },
+      timeout: 20000
+    });
+
+    if (res.data?.base_resp?.ret !== 0) {
+      throw new Error(res.data?.base_resp?.err_msg || 'article sync failed');
+    }
+
+    const batch = res.data.articles || [];
+    all.push(...batch);
+
+    if (!batch.length || batch.length < FETCH_SIZE) break;
+    if (!Number.isFinite(begin)) break;
+
+    const nextBegin = begin + batch.length;
+    if (nextBegin === begin) break;
+    begin = nextBegin;
+
+    if (begin > 5000) break;
+  }
+
+  return all;
 }
 
 async function syncSource(db, source) {
-  const feedUrl = detectFeedUrl(source);
-  if (!feedUrl) {
-    return { sourceId: source.id, synced: 0, skipped: true, reason: 'No feed URL or wechat_id' };
-  }
+  const rawArticles = await fetchAllArticles(source);
+  const articles = rawArticles.map((item) => normalizeArticle(source, item));
 
-  const feed = await parser.parseURL(feedUrl);
-  const items = feed.items || [];
   const insertStmt = db.prepare(`
-    INSERT INTO articles (id, source_id, title, description, category, link, update_time, author_name)
-    VALUES (@id, @source_id, @title, @description, @category, @link, @update_time, @author_name)
+    INSERT INTO articles (id, source_id, title, digest, category, link, update_time, author_name)
+    VALUES (@id, @source_id, @title, @digest, @category, @link, @update_time, @author_name)
     ON CONFLICT(id) DO UPDATE SET
       title=excluded.title,
-      description=excluded.description,
+      digest=excluded.digest,
       category=excluded.category,
       link=excluded.link,
       update_time=excluded.update_time,
-      author_name=excluded.author_name
+      author_name=excluded.author_name,
+      source_id=excluded.source_id
   `);
 
   const tx = db.transaction((rows) => {
-    let synced = 0;
     for (const row of rows) {
       insertStmt.run(row);
-      synced += 1;
     }
-    return synced;
+    return rows.length;
   });
 
-  const normalized = items.map((item) => mapItem(source, item));
-  const synced = tx(normalized);
-
+  const synced = tx(articles);
   return { sourceId: source.id, synced, skipped: false };
 }
 
-async function searchPublicAccounts(query) {
-  const cheerio = require('cheerio');
-  const decodeSogouUrl = (value = '') => {
-    if (!value) return '';
-    try {
-      const parsed = new URL(value, 'https://weixin.sogou.com');
-      const jump = parsed.searchParams.get('url') || parsed.searchParams.get('k') || '';
-      return jump ? decodeURIComponent(jump) : parsed.toString();
-    } catch (_error) {
-      return value;
-    }
-  };
-
-  const normalize = (raw = '') => raw
-    .replace(/\s+/g, ' ')
-    .replace(/^微信号\s*[：:]\s*/u, '')
-    .trim();
-
-  const parseFromHtml = (html) => {
-    const $ = cheerio.load(html);
-    const results = [];
-    const seen = new Set();
-
-    const cards = [
-      '.news-box ul.news-list li',
-      '.news-box ul.news-list2 li',
-      '.gzh-box2 .gzh-box2-list li',
-      '.results .txt-box',
-      'li[class*="news-list"]',
-      '.wx-rb'
-    ].join(',');
-
-    $(cards).each((_, el) => {
-      const root = $(el);
-      const nameLink = root.find('.txt-box h3 a, h3 a, .tit a, a[data-z]')
-        .filter((_, a) => Boolean($(a).text().trim()))
-        .first();
-
-      const name = normalize(nameLink.text());
-      const wechatId = normalize(root.find('.s-p, .info label, p.info, .account').text());
-      const description = normalize(root.find('.txt-info, .s-p2, .intro, .sp-txt').text());
-      const rawProfile = nameLink.attr('href') || root.find('a[href*="/gzh?"]').attr('href') || '';
-      const profileUrl = decodeSogouUrl(rawProfile);
-
-      if (!name) return;
-
-      const id = crypto.createHash('sha1').update(`${name}|${wechatId}|${profileUrl}`).digest('hex').slice(0, 24);
-      if (seen.has(id)) return;
-      seen.add(id);
-
-      results.push({
-        id,
-        name,
-        wechat_id: wechatId,
-        description,
-        profile_url: profileUrl,
-        feed_url: wechatId ? `https://wechat2rss.xlab.app/feed/${encodeURIComponent(wechatId)}` : null
-      });
-    });
-
-    return results;
-  };
-
-  const urls = [
-    `https://weixin.sogou.com/weixin?type=1&ie=utf8&query=${encodeURIComponent(query)}`,
-    `https://weixin.sogou.com/weixinwap?ie=utf8&type=1&query=${encodeURIComponent(query)}`
-  ];
-
-  const commonHeaders = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    Referer: 'https://weixin.sogou.com/',
-    Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    'Accept-Language': 'zh-CN,zh;q=0.9'
-  };
-
-  for (const url of urls) {
-    try {
-      // eslint-disable-next-line no-await-in-loop
-      const res = await axios.get(url, {
-        timeout: 12000,
-        maxRedirects: 5,
-        headers: commonHeaders
-      });
-
-      const list = parseFromHtml(res.data);
-      if (list.length) return list.slice(0, 20);
-    } catch (_error) {
-      // Try next source.
-    }
-  }
-
-  throw new Error('No public account results from upstream search pages');
-}
-
 module.exports = {
-  syncSource,
-  searchPublicAccounts
+  searchPublicAccounts,
+  syncSource
 };
