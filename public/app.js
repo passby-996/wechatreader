@@ -5,17 +5,32 @@ const state = {
   categoryPages: {}
 };
 
-async function api(url, options) {
+async function api(url, options = {}) {
   const res = await fetch(url, {
     headers: { 'Content-Type': 'application/json' },
     ...options
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || `Request failed: ${res.status}`);
+  }
   return res.json();
 }
 
-function esc(text = '') {
-  return text.replace(/[&<>'"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[ch]));
+function esc(value) {
+  return String(value || '').replace(/[&<>'"]/g, (ch) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    "'": '&#39;',
+    '"': '&quot;'
+  })[ch]);
+}
+
+function toISODate(value) {
+  const num = Number(value);
+  const date = Number.isFinite(num) ? new Date(num * 1000) : new Date(value);
+  return Number.isNaN(date.getTime()) ? '-' : date.toLocaleString();
 }
 
 async function loadSources() {
@@ -24,7 +39,7 @@ async function loadSources() {
   list.innerHTML = state.sources.map((s) => `
     <li>
       <strong>${esc(s.name)}</strong><br />
-      <small>${esc(s.wechat_id || '')}</small><br />
+      <small>${esc(s.wechat_id || s.alias || '')}</small><br />
       <button data-pick="${s.id}">View</button>
       <button data-sync="${s.id}">Sync</button>
     </li>
@@ -40,37 +55,35 @@ async function searchSource() {
     <div class="item">
       <strong>${esc(s.name)}</strong>
       <p>${esc(s.description || '')}</p>
-      <small>${esc(s.wechat_id || '')}</small><br />
-      <button data-add='${JSON.stringify(s)}'>Add to SOURCE LIST</button>
+      <small>${esc(s.wechat_id || s.alias || '')}</small><br />
+      <button data-add="${encodeURIComponent(JSON.stringify(s))}">Add to SOURCE LIST</button>
     </div>
   `).join('');
 }
 
 async function addSource(payload) {
-  await api('/api/sources', {
-    method: 'POST',
-    body: JSON.stringify(payload)
-  });
+  await api('/api/sources', { method: 'POST', body: JSON.stringify(payload) });
   await loadSources();
 }
 
 async function renderCategories() {
-  const q = state.articleQuery;
   const sourceParam = state.selectedSourceId ? `&sourceId=${encodeURIComponent(state.selectedSourceId)}` : '';
-  const categories = await api(`/api/categories?q=${encodeURIComponent(q)}${sourceParam}`);
+  const categories = await api(`/api/categories?q=${encodeURIComponent(state.articleQuery)}${sourceParam}`);
 
   const warning = document.getElementById('warning');
-  if (!categories.length) warning.classList.remove('hidden');
-  else warning.classList.add('hidden');
+  warning.classList.toggle('hidden', Boolean(categories.length));
 
   const wrapper = document.getElementById('categories');
-  wrapper.innerHTML = categories.map((c) => `
-    <details class="category" data-category="${esc(c.category || 'Uncategorized')}">
-      <summary>${esc(c.category || 'Uncategorized')} (${c.count})</summary>
-      <div class="gallery"></div>
-      <div class="pagination"></div>
-    </details>
-  `).join('');
+  wrapper.innerHTML = categories.map((c) => {
+    const category = c.category || 'others';
+    return `
+      <details class="category" data-category="${esc(category)}">
+        <summary>${esc(category)} (${c.count})</summary>
+        <div class="gallery"></div>
+        <div class="pagination"></div>
+      </details>
+    `;
+  }).join('');
 }
 
 async function renderCategoryPage(category) {
@@ -78,23 +91,24 @@ async function renderCategoryPage(category) {
   const params = new URLSearchParams({ category, page: String(page) });
   if (state.selectedSourceId) params.set('sourceId', state.selectedSourceId);
   if (state.articleQuery) params.set('q', state.articleQuery);
-  const data = await api(`/api/articles?${params.toString()}`);
 
+  const data = await api(`/api/articles?${params.toString()}`);
   const details = [...document.querySelectorAll('.category')].find((e) => e.dataset.category === category);
   if (!details) return;
+
   details.querySelector('.gallery').innerHTML = data.items.map((a) => `
     <a class="card" href="${esc(a.link)}" target="_blank" rel="noreferrer">
       <h4>${esc(a.title)}</h4>
-      <p>${esc(a.description || '')}</p>
+      <p>${esc(a.digest || '')}</p>
       <div class="meta">${esc(a.source_name || a.author_name || '')}</div>
-      <div class="meta">${new Date(a.update_time).toLocaleString()}</div>
+      <div class="meta">${toISODate(a.update_time)}</div>
     </a>
   `).join('');
 
   details.querySelector('.pagination').innerHTML = `
     <span>Page ${data.page} / ${data.totalPages}</span>
-    <button ${data.page <= 1 ? 'disabled' : ''} data-prev="${category}">Prev</button>
-    <button ${data.page >= data.totalPages ? 'disabled' : ''} data-next="${category}">Next</button>
+    <button ${data.page <= 1 ? 'disabled' : ''} data-prev="${esc(category)}">Prev</button>
+    <button ${data.page >= data.totalPages ? 'disabled' : ''} data-next="${esc(category)}">Next</button>
   `;
 }
 
@@ -116,10 +130,7 @@ document.getElementById('articleSearchBtn').addEventListener('click', async () =
 
 document.body.addEventListener('click', async (e) => {
   const addBtn = e.target.closest('[data-add]');
-  if (addBtn) {
-    const payload = JSON.parse(addBtn.dataset.add);
-    await addSource(payload);
-  }
+  if (addBtn) await addSource(JSON.parse(decodeURIComponent(addBtn.dataset.add)));
 
   const pickBtn = e.target.closest('[data-pick]');
   if (pickBtn) {
@@ -151,9 +162,7 @@ document.body.addEventListener('click', async (e) => {
 
 document.body.addEventListener('toggle', (e) => {
   const details = e.target.closest('.category');
-  if (details && details.open) {
-    renderCategoryPage(details.dataset.category).catch(console.error);
-  }
+  if (details && details.open) renderCategoryPage(details.dataset.category).catch(console.error);
 }, true);
 
 (async function init() {
